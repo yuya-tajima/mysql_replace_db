@@ -18,7 +18,8 @@ class Conv4
   protected $tset;
   protected $regexs;
   protected $method;
-  protected $mode = 'test';
+  protected $no_check = false;
+  protected $mode     = 'test';
 
   const TABLE_REGEX         = '/.*/';
   const TABLE_EXCLUDE_REGEX = '/^$/';
@@ -45,10 +46,14 @@ class Conv4
 
   public function checkBeforeExe()
   {
+    if ( $this->no_check ) {
+      return;
+    }
+
     echo PHP_EOL;
     echo 'DB name is \'' . $this->param['db_name'] . '\'' .  PHP_EOL;
     echo PHP_EOL;
-    echo 'The following replacement word..' . PHP_EOL;
+    echo 'The following replacement words..' . PHP_EOL;
     foreach ( $this->regexs as $k => $v) {
       echo $k . ' => ' . $v . PHP_EOL;
     }
@@ -73,9 +78,10 @@ class Conv4
       $this->displayHelpMsg();
     }
 
-    if($opt = $argv[1]){
+    if( $opt = $argv[1] ){
       if($opt === '-s'){
         $this->method = 'searchdomain';
+        $this->no_check = true;
       }elseif($opt === '--test' || $opt === '--update' ){
         $this->method = 'mainAction';
         if($opt === '--update'){
