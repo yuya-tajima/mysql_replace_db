@@ -1,14 +1,10 @@
 <?php
-
-/*
-  key   is replace form.
-  value is replace to.
-
+/**
+* Search and Replace on Database.
+*
+* @author Yuya Tajima
+* @link https://github.com/yuya-tajima/mysql_replace_db/blob/master/conv4.php
 */
-
-$regexs = array(
-  'example.com'  => 'test.example.com',
-);
 
 class Conv4
 {
@@ -58,7 +54,7 @@ class Conv4
       echo $k . ' => ' . $v . PHP_EOL;
     }
     echo PHP_EOL;
-    $final_answer = getWord('Ok ? yes or no');
+    $final_answer = trim( getWord('Ok ? yes or no') );
 
     if ( $final_answer !== 'yes') {
       die( 'Stop the execution.' . PHP_EOL );
@@ -405,22 +401,6 @@ EOF;
     }
   }
 }
-
-$db_user   = getWord('db user');
-$pass_word = getWord('Password', true);
-$db_name   = getWord('db name');
-
-$db_args = array(
-  'server'  => 'localhost',
-  'user'    => $db_user,
-  'pass'    => $pass_word,
-  'db_name' => $db_name
-);
-
-$db = new Conv4( $db_args, $regexs );
-$db->checkBeforeExe();
-$db->exe();
-
 function getWord( $title, $hidden = false ) {
 
   fwrite( STDOUT, $title . ': ');
@@ -433,3 +413,27 @@ function getWord( $title, $hidden = false ) {
 
   return trim( $input );
 }
+
+function exe () {
+  $from = trim( getWord('replace from ') );
+  $to   = trim( getWord('replace to?') );
+
+  $regexs = array( $from  => $to );
+
+  $db_user   = getWord('db user');
+  $pass_word = getWord('Password', true);
+  $db_name   = getWord('db name');
+
+  $db_args = array(
+    'server'  => 'localhost',
+    'user'    => $db_user,
+    'pass'    => $pass_word,
+    'db_name' => $db_name
+  );
+
+  $db = new Conv4( $db_args, $regexs );
+  $db->checkBeforeExe();
+  $db->exe();
+}
+
+exe();
