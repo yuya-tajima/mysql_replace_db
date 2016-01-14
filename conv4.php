@@ -11,11 +11,13 @@ class Conv4
   protected $param = array();
   protected $mysqli;
   protected $tables;
-  protected $tset;
+  protected $table_set;
   protected $regexs;
   protected $method;
-  protected $no_check = false;
-  protected $mode     = 'test';
+  protected $check   = true;
+  protected $mode    = 'test';
+  protected $verbose = false;
+  protected $log     = NULL;
 
   const TABLE_REGEX         = '/.*/';
   const TABLE_EXCLUDE_REGEX = '/^$/';
@@ -24,25 +26,46 @@ class Conv4
 
   const OPTION_NAME = 'siteurl';
 
-  public function __construct($db_args, $regexs)
+  public function __construct( $file_name = NULL )
   {
+    if ( is_string($file_name) ) {
+      $fp = fopen($file_name, 'wb');
+      if( is_resource($fp) && flock( $fp, LOCK_EX | LOCK_NB ) ) {
+        $this->log = $fp;
+      }
+    }
+
+    if ( ! $this->log ) {
+      $this->log = fopen('php://output', 'w');
+    }
 
     $this->paramInit();
+
+    if ( $this->check ) {
+      $from = trim( $this->getWord('replace from ') );
+      $to   = trim( $this->getWord('replace to ?') );
+      $regexs = array( $from  => $to );
+      $this->regexs = $this->getQuotedRegexs( $regexs );
+    }
+
+    $db_args = array(
+      'server'  => 'localhost',
+      'user'    => $this->getWord('db user'),
+      'pass'    => $this->getWord('Password', true),
+      'db_name' => $this->getWord('db name'),
+    );
 
     $this->param['server']  = $db_args['server'];
     $this->param['user']    = $db_args['user'];
     $this->param['pass']    = $db_args['pass'];
     $this->param['db_name'] = $db_args['db_name'];
 
-    $this->regexs = $this->getQuotedRegexs($regexs);
-
     $this->dbInit();
-
   }
 
   public function checkBeforeExe()
   {
-    if ( $this->no_check ) {
+    if ( ! $this->check ) {
       return;
     }
 
@@ -54,7 +77,7 @@ class Conv4
       echo $k . ' => ' . $v . PHP_EOL;
     }
     echo PHP_EOL;
-    $final_answer = trim( getWord('Ok ? yes or no') );
+    $final_answer = trim( $this->getWord('Ok ? yes or no') );
 
     if ( $final_answer !== 'yes') {
       die( 'Stop the execution.' . PHP_EOL );
@@ -64,30 +87,31 @@ class Conv4
   public function exe()
   {
     $this->{$this->method}();
+    $this->mysqli->close();
   }
 
   private function paramInit()
   {
-    $argv = $GLOBALS['argv'];
 
-    if(! isset($argv[1])){
+    $opt = getopt('sv', array('update', 'test', 'split:'));
+    if ( ! $opt) {
       $this->displayHelpMsg();
     }
 
-    if( $opt = $argv[1] ){
-      if($opt === '-s'){
-        $this->method = 'searchdomain';
-        $this->no_check = true;
-      }elseif($opt === '--test' || $opt === '--update' ){
-        $this->method = 'mainAction';
-        if($opt === '--update'){
-          $this->mode = 'update';
-        }
-      }else{
-        $this->displayHelpMsg();
+    if ( isset($opt['s']) ) {
+      $this->method = 'searchdomain';
+      $this->check = false;
+    } else {
+      $this->method = 'mainAction';
+      if ( isset($opt['split']) && $opt['split'] ) {
+        $this->split = (int) trim( $opt['split'] );
       }
-    }else{
-      $this->displayHelpMsg();
+      if ( isset($opt['update']) ) {
+        $this->mode = 'update';
+      }
+      if ( isset($opt['v']) ) {
+        $this->verbose = true;
+      }
     }
   }
 
@@ -120,12 +144,12 @@ EOF;
     }
   }
 
-  protected function getQuotedRegexs($regexs, $delimiter = '/')
+  protected function getQuotedRegexs($regexs, $delimiter = '/', $modifiers =  'u' )
   {
     $_regexes = array();
 
     foreach($regexs as $key => $val){
-      $_regexes[$delimiter . preg_quote($key, $delimiter) . $delimiter] = $val;
+      $_regexes[$delimiter . preg_quote($key, $delimiter) . $delimiter . $modifiers ] = $val;
     }
 
     return $_regexes;
@@ -135,7 +159,7 @@ EOF;
   {
     $this->mysqli = $this->dbConnect();
     $this->tables = $this->getTables();
-    $this->tset   = $this->getTset();
+    $this->table_set = $this->getTableSet();
   }
 
   protected function dbConnect()
@@ -167,128 +191,167 @@ EOF;
       }
     }
 
+    //$this->stdOut( 'Target tables are ...' . PHP_EOL . implode( PHP_EOL, $tables ) );
+
     return $tables;
   }
 
-  protected function getTset()
+  protected function getTableSet()
   {
-    $tset = array();
+    $table_set = array();
 
-    foreach ($this->tables as $t) {
-      $sql = "
-        SELECT *
-        FROM `$t`
-        LIMIT 1
-        ";
-      $result = $this->mysqli->query($sql);
-      $row = $result->fetch_assoc();
-      if (is_array($row)) {
-        $fields = array_keys($row);
-        $id = array_shift($fields);
-        $tmp = array();
-        foreach ($fields as $f) {
-          if (preg_match(self::FIELD_REGEX, $f) && !preg_match(self::FIELD_EXCLUDE_REGEX, $f)) {
-            $tmp['table'] = $t;
-            $tmp['id'] = $id;
-            $tmp['fs'][] = $f;
-          }
+    foreach ( $this->tables as $t) {
+      $tmp = array();
+      $tmp['table'] = $t;
+      $result = $this->mysqli->query("DESCRIBE `$t`");
+      while( $row = $result->fetch_assoc() ) {
+        if ( $row['Key'] === 'PRI' ) {
+          $tmp['id'][] = $row['Field'];
         }
-        if (!empty($tmp)) {
-          $tset[] = $tmp;
-        }
+        $tmp['fs'][] = $row['Field'];
       }
+      if ( ! isset($tmp['id'] ) ) {
+        $this->stdOut( $t . ' primary key does not exist' );
+        continue;
+      }
+      $table_set[] = $tmp;
     }
-    return $tset;
+
+    return $table_set;
+  }
+
+  private function convertToIntegerID ( $row, $id )
+  {
+    $new_row = array();
+    foreach ( $row as $k => $v ) {
+      if ( in_array( $k, $id, true ) ) {
+        $v = (int) $v;
+      }
+      $new_row[$k] = $v;
+    }
+
+    return $new_row;
   }
 
   public function mainAction()
   {
-    $i = 0;
-    $all = 0;
-
-    foreach ($this->tset as $meta) {
-      $t = $meta['table'];
+    foreach ( $this->table_set as $meta ) {
+      $t  = $meta['table'];
       $id = $meta['id'];
       $fs = $meta['fs'];
 
-      $sql = $this->make_sql_select_all_data($t, $id, $fs);
-      $result = $this->mysqli->query($sql);
-      while($row = $result->fetch_assoc()) {
-        $after = $this->check($row);
-        if ($after != $row) {
-          $i++;
-          $after = $this->make_diff_field($row, $after);
-          $sql = $this->make_sql_for_update($t, $id, $after);
-          if ($this->mode === 'update') {
-            $up = $this->mysqli->query($sql);
-            if ($up == false) {
-              echo "update error.\n";
+      $off_set = $this->split ? 0 : false;
+      $sql     = $this->make_sql_select_all_data($t, $id, $fs, $off_set );
+      $result  = $this->mysqli->query($sql);
+      $this->stdOut( $t . ' table fetch num :' . $result->num_rows );
+      $change_num  = 0;
+      while( $row = $result->fetch_assoc() ) {
+        $row   = $this->convertToIntegerID( $row, $id );
+        $after = $this->check( $row, $id );
+        if ( $after !== $row ) {
+          if ( $this->verbose ) {
+            $diff = array_diff($after, $row);
+            var_dump($diff);
+          }
+          ++$change_num;
+          if ( $this->mode === 'update' ) {
+            $after = $this->make_diff_field($row, $after, $id);
+            $sql = $this->make_sql_for_update($t, $id, $after);
+            //$up = $this->mysqli->query($sql);
+            if ( $up === false ) {
+              $this->stdOut( sprintf( "Errormessage: %s\n", $this->mysqli->error ) );
               exit;
             }
           }
         }
-        $all++;
       }
+      $this->stdOut( 'replace counts ' . $change_num );
     }
-    var_dump($i, $all);
   }
 
-  protected function make_sql_select_all_data($t, $id, $fs)
+  protected function make_sql_select_all_data($t, $id, $fs, &$off_set)
   {
+
+    $fs = array_diff($fs, $id);
+
     foreach ($fs as $key => $val) {
       $fs[$key] = '`' . $val . '`';
     }
+
+    $id = implode(',', $id);
     $fs = implode(',', $fs);
 
-    $sql = "
-      SELECT  `$id`,
-      $fs
-      FROM  `$t`
-      ";
+    $limit = '';
+    if ( ( $off_set !== false ) && $this->split ) {
+      $row_count = $off_set + $this->split;
+      $limit = "LIMIT $off_set, $row_count";
+    }
+
+    $sql = "SELECT $id, $fs FROM `$t` $limit ";
+
+    if ( ( $off_set !== false ) && $this->split ) {
+      $off_set += $this->split;
+    }
     return $sql;
   }
 
-  protected function make_diff_field($row, $after)
+  protected function make_diff_field($row, $after, $id)
   {
     $new = array();
-    $first = true;
-    foreach ($row as $key => $val) {
-      if ($first) {
-        $first = false;
+    foreach ( $row as $key => $val ) {
+      if ( in_array( $key, $id, true ) ) {
         continue;
       }
-      if ($val == $after[$key]) {
+      if ($val === $after[$key]) {
         unset($after[$key]);
       }
     }
+
     return $after;
   }
 
-  protected function make_sql_for_update($t, $idname, $after) 
+  protected function make_sql_for_update($t, $id, $after)
   {
-    $id_value = array_shift($after);
+
+    $where_arr = array();
+    foreach ($id as $v ) {
+       $where_arr[] = ' `' . $v . '` = ' . $after[$v];
+    }
+
+    $where = implode( 'AND', $where_arr );
+
     $this->escape_sql($after);
     $update = array();
     foreach ($after as $key => $val) {
-      $update[] = "\t`$key` = '$val'";
+      if ( is_string ($val ) ) {
+        $val = "'$val'";
+      }
+      $update[] = "`$key` = $val";
     }
-    $update = implode(",\n" , $update);
-    $sql = "
-      UPDATE  `$t` SET
-      $update
-      WHERE `$idname` = '$id_value'
-      ";
+    $update = implode(',' , $update);
+    $sql = "UPDATE `$t` SET $update WHERE $where";
+
     return $sql;
+  }
+
+  private function excludePkFromColumn ( $id, $column )
+  {
+    $id     = array_flip($id);
+    $column = array_diff_key($column, $id);
+
+    return $column;
   }
 
   protected function escape_sql(&$arr)
   {
-    if (is_array($arr)) {
-      foreach ($arr as $key => $val) {
-        $arr[$key] = $this->mysqli->real_escape_string($val);
+    if ( is_array($arr) ) {
+      foreach ($arr as $key => &$val) {
+        $this->escape_sql($val);
       }
     } else {
-      $arr = $this->mysqli->real_escape_string($arr);
+      if ( is_string ($arr) ) {
+        $arr = $this->mysqli->real_escape_string($arr);
+      }
     }
   }
 
@@ -349,11 +412,13 @@ EOF;
     return false;
   }
 
-  protected function check($arr)
+  protected function check($arr, $id)
   {
     $new = $arr;
-    $id = array_shift($arr);
+
+    $arr = $this->excludePkFromColumn($id, $arr);
     foreach ($arr as $key => $val) {
+
       if ( $this->is_serialized( $val ) ) {
         $test = unserialize($val);
         if ($test === false) {
@@ -379,17 +444,10 @@ EOF;
 
   protected function test(&$obj, $key)
   {
+
     $type = gettype($obj);
 
-    if ($key) {
-      foreach ($this->regexs as $regex => $replace){
-        if (preg_match($regex, $key)) {
-          echo "in key => $key\n";
-        }
-      }
-    }
-
-    if ($type == 'object' || $type == 'array') {
+    if ( $type == 'object' || $type == 'array' ) {
       array_walk_recursive( $obj, array( $this, 'test'));
       return;
     }
@@ -400,40 +458,25 @@ EOF;
       }
     }
   }
-}
-function getWord( $title, $hidden = false ) {
+  private function getWord ( $title, $hidden = false )
+  {
+    fwrite( STDOUT, $title . ': ');
+    if( $hidden ) system( 'stty -echo' );
+    @flock( STDIN, LOCK_EX );
+    $input = fgets(STDIN );
+    if( $hidden ) system( 'stty echo' );
+    @flock( STDIN, LOCK_UN );
+    if( $hidden ) fwrite( STDOUT, "\n" );
 
-  fwrite( STDOUT, $title . ': ');
-  if( $hidden ) system( 'stty -echo' );
-  @flock( STDIN, LOCK_EX );
-  $input = fgets(STDIN );
-  if( $hidden ) system( 'stty echo' );
-  @flock( STDIN, LOCK_UN );
-  if( $hidden ) fwrite( STDOUT, "\n" );
+    return trim( $input );
+  }
 
-  return trim( $input );
-}
-
-function exe () {
-  $from = trim( getWord('replace from ') );
-  $to   = trim( getWord('replace to?') );
-
-  $regexs = array( $from  => $to );
-
-  $db_user   = getWord('db user');
-  $pass_word = getWord('Password', true);
-  $db_name   = getWord('db name');
-
-  $db_args = array(
-    'server'  => 'localhost',
-    'user'    => $db_user,
-    'pass'    => $pass_word,
-    'db_name' => $db_name
-  );
-
-  $db = new Conv4( $db_args, $regexs );
-  $db->checkBeforeExe();
-  $db->exe();
+  private function stdOut ( $msg  )
+  {
+    fwrite($this->log, $msg . PHP_EOL );
+  }
 }
 
-exe();
+$db = new Conv4();
+$db->checkBeforeExe();
+$db->exe();
